@@ -27,6 +27,15 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
+    - name: Create ECR repository if not exists
+      run: |
+        aws ecr describe-repositories \
+          --repository-names ${{ secrets.ECR_REPOSITORY }} \
+          --region ${{ secrets.AWS_REGION }} \
+        || aws ecr create-repository \
+          --repository-name ${{ secrets.ECR_REPOSITORY }} \
+          --region ${{ secrets.AWS_REGION }}
+
     - name: Build Docker image
       run: |
         docker build -t myapp .
@@ -39,8 +48,6 @@ jobs:
         output: trivy-report.txt
         severity: CRITICAL,HIGH,MEDIUM
         exit-code: 0
-        ignore-unfixed: true
-        vuln-type: 'os,library'
 
     - name: Upload Trivy report
       uses: actions/upload-artifact@v4
