@@ -66,10 +66,35 @@ jobs:
         docker push \
         ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
 
-    - name: Ensure ECS cluster exists
+    - name: Ensure ECS execution role exists
       run: |
-        if ! aws ecs describe-clusters --clusters ${{ secrets.ECS_CLUSTER }} --query "clusters[0].status" --output text 2>/dev/null | grep ACTIVE; then
-          aws ecs create-cluster --cluster-name ${{ secrets.ECS_CLUSTER }}
+        ROLE_NAME="ecsTaskExecutionRole"
+
+        if ! aws iam get-role --role-name $ROLE_NAME > /dev/null 2>&1; then
+
+          cat <<EOF > trust-policy.json
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "ecs-tasks.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }
+          EOF
+
+          aws iam create-role \
+            --role-name $ROLE_NAME \
+            --assume-role-policy-document file://trust-policy.json
+
+          aws iam attach-role-policy \
+            --role-name $ROLE_NAME \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
         fi
 
     - name: Register task definition
