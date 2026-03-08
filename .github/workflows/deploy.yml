@@ -7,12 +7,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-deploy:
+  deploy:
 
     runs-on: ubuntu-latest
 
     env:
       IMAGE_NAME: myapp
+      TASK_FAMILY: my-task
 
     steps:
 
@@ -26,31 +27,29 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Login to ECR
+    - name: Login to Amazon ECR
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
     - name: Ensure ECR repository exists
       run: |
-        if ! aws ecr describe-repositories --repository-names ${{ secrets.ECR_REPOSITORY }} >/dev/null 2>&1; then
-          aws ecr create-repository \
-            --repository-name ${{ secrets.ECR_REPOSITORY }}
-        fi
+        aws ecr describe-repositories \
+        --repository-names ${{ secrets.ECR_REPOSITORY }} \
+        || aws ecr create-repository \
+        --repository-name ${{ secrets.ECR_REPOSITORY }}
 
     - name: Build Docker image
-      run: |
-        docker build -t $IMAGE_NAME .
+      run: docker build -t $IMAGE_NAME .
 
-    - name: Scan with Trivy
+    - name: Scan image with Trivy
       uses: aquasecurity/trivy-action@master
       with:
         image-ref: ${{ env.IMAGE_NAME }}
         format: table
         output: trivy-report.txt
-        severity: CRITICAL,HIGH,MEDIUM
         exit-code: 0
 
-    - name: Upload Trivy report
+    - name: Upload security report
       uses: actions/upload-artifact@v4
       with:
         name: trivy-report
@@ -66,42 +65,19 @@ jobs:
         docker push \
         ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
 
-    - name: Ensure ECS execution role exists
+    - name: Ensure ECS cluster exists
       run: |
-        ROLE_NAME="ecsTaskExecutionRole"
-
-        if ! aws iam get-role --role-name $ROLE_NAME > /dev/null 2>&1; then
-
-          cat <<EOF > trust-policy.json
-          {
-            "Version": "2012-10-17",
-            "Statement": [
-              {
-                "Effect": "Allow",
-                "Principal": {
-                  "Service": "ecs-tasks.amazonaws.com"
-                },
-                "Action": "sts:AssumeRole"
-              }
-            ]
-          }
-          EOF
-
-          aws iam create-role \
-            --role-name $ROLE_NAME \
-            --assume-role-policy-document file://trust-policy.json
-
-          aws iam attach-role-policy \
-            --role-name $ROLE_NAME \
-            --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-
-        fi
+        aws ecs describe-clusters \
+        --clusters ${{ secrets.ECS_CLUSTER }} \
+        || aws ecs create-cluster \
+        --cluster-name ${{ secrets.ECS_CLUSTER }}
 
     - name: Register task definition
       run: |
-        cat <<EOF > task-definition.json
+        cat > task-definition.json <<EOF
         {
-          "family": "my-task",
+          "family": "${TASK_FAMILY}",
+          "executionRoleArn": "arn:aws:iam::173987373607:role/ecsTaskExecutionRole",
           "networkMode": "awsvpc",
           "requiresCompatibilities": ["FARGATE"],
           "cpu": "256",
@@ -123,7 +99,7 @@ jobs:
         EOF
 
         aws ecs register-task-definition \
-          --cli-input-json file://task-definition.json
+        --cli-input-json file://task-definition.json
 
     - name: Create service if not exists
       run: |
@@ -131,12 +107,12 @@ jobs:
           --cluster ${{ secrets.ECS_CLUSTER }} \
           --services ${{ secrets.ECS_SERVICE }} \
           --query "services[0].status" \
-          --output text 2>/dev/null | grep ACTIVE; then
+          --output text | grep ACTIVE; then
 
           aws ecs create-service \
             --cluster ${{ secrets.ECS_CLUSTER }} \
             --service-name ${{ secrets.ECS_SERVICE }} \
-            --task-definition my-task \
+            --task-definition ${TASK_FAMILY} \
             --desired-count 1 \
             --launch-type FARGATE \
             --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],assignPublicIp=ENABLED}"
@@ -145,6 +121,6 @@ jobs:
     - name: Force new deployment
       run: |
         aws ecs update-service \
-          --cluster ${{ secrets.ECS_CLUSTER }} \
-          --service ${{ secrets.ECS_SERVICE }} \
-          --force-new-deployment
+        --cluster ${{ secrets.ECS_CLUSTER }} \
+        --service ${{ secrets.ECS_SERVICE }} \
+        --force-new-deployment
