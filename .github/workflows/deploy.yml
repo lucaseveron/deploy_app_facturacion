@@ -1,4 +1,4 @@
-name: CI-CD AWS
+name: Deploy to AWS ECS
 
 on:
   push:
