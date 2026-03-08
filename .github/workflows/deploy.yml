@@ -34,17 +34,21 @@ jobs:
             --repository-name ${{ secrets.ECR_REPOSITORY }} \
             --region ${{ secrets.AWS_REGION }}
         fi
-
     - name: Ensure ECS cluster exists
       run: |
-        if ! aws ecs describe-clusters \
+        CLUSTER_STATUS=$(aws ecs describe-clusters \
           --clusters ${{ secrets.ECS_CLUSTER }} \
           --region ${{ secrets.AWS_REGION }} \
-          --query "clusters[0].clusterName" \
-          --output text 2>/dev/null; then
-            aws ecs create-cluster \
-              --cluster-name ${{ secrets.ECS_CLUSTER }} \
-              --region ${{ secrets.AWS_REGION }}
+          --query "clusters[0].status" \
+          --output text 2>/dev/null || echo "MISSING")
+
+        if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
+          echo "Creating ECS cluster..."
+          aws ecs create-cluster \
+            --cluster-name ${{ secrets.ECS_CLUSTER }} \
+            --region ${{ secrets.AWS_REGION }}
+        else
+          echo "Cluster already exists"
         fi
 
     - name: Build Docker image
