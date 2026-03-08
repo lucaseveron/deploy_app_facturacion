@@ -7,13 +7,16 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-deploy:
+  build-deploy:
 
     runs-on: ubuntu-latest
 
+    env:
+      IMAGE_NAME: myapp
+
     steps:
 
-    - name: Checkout code
+    - name: Checkout repository
       uses: actions/checkout@v4
 
     - name: Configure AWS credentials
@@ -23,42 +26,25 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Login to Amazon ECR
+    - name: Login to ECR
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
     - name: Ensure ECR repository exists
       run: |
-        if ! aws ecr describe-repositories --repository-names ${{ secrets.ECR_REPOSITORY }} --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1; then
+        if ! aws ecr describe-repositories --repository-names ${{ secrets.ECR_REPOSITORY }} >/dev/null 2>&1; then
           aws ecr create-repository \
-            --repository-name ${{ secrets.ECR_REPOSITORY }} \
-            --region ${{ secrets.AWS_REGION }}
-        fi
-    - name: Ensure ECS cluster exists
-      run: |
-        CLUSTER_STATUS=$(aws ecs describe-clusters \
-          --clusters ${{ secrets.ECS_CLUSTER }} \
-          --region ${{ secrets.AWS_REGION }} \
-          --query "clusters[0].status" \
-          --output text 2>/dev/null || echo "MISSING")
-
-        if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
-          echo "Creating ECS cluster..."
-          aws ecs create-cluster \
-            --cluster-name ${{ secrets.ECS_CLUSTER }} \
-            --region ${{ secrets.AWS_REGION }}
-        else
-          echo "Cluster already exists"
+            --repository-name ${{ secrets.ECR_REPOSITORY }}
         fi
 
     - name: Build Docker image
       run: |
-        docker build -t myapp .
+        docker build -t $IMAGE_NAME .
 
-    - name: Scan vulnerabilities with Trivy
+    - name: Scan with Trivy
       uses: aquasecurity/trivy-action@master
       with:
-        image-ref: myapp
+        image-ref: ${{ env.IMAGE_NAME }}
         format: table
         output: trivy-report.txt
         severity: CRITICAL,HIGH,MEDIUM
@@ -67,18 +53,71 @@ jobs:
     - name: Upload Trivy report
       uses: actions/upload-artifact@v4
       with:
-        name: trivy-security-report
+        name: trivy-report
         path: trivy-report.txt
 
-    - name: Tag image
+    - name: Tag Docker image
       run: |
-        docker tag myapp:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
+        docker tag $IMAGE_NAME:latest \
+        ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
 
     - name: Push image to ECR
       run: |
-        docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
+        docker push \
+        ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
 
-    - name: Deploy to ECS
+    - name: Ensure ECS cluster exists
+      run: |
+        if ! aws ecs describe-clusters --clusters ${{ secrets.ECS_CLUSTER }} --query "clusters[0].status" --output text 2>/dev/null | grep ACTIVE; then
+          aws ecs create-cluster --cluster-name ${{ secrets.ECS_CLUSTER }}
+        fi
+
+    - name: Register task definition
+      run: |
+        cat <<EOF > task-definition.json
+        {
+          "family": "my-task",
+          "networkMode": "awsvpc",
+          "requiresCompatibilities": ["FARGATE"],
+          "cpu": "256",
+          "memory": "512",
+          "containerDefinitions": [
+            {
+              "name": "myapp",
+              "image": "${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest",
+              "essential": true,
+              "portMappings": [
+                {
+                  "containerPort": 8080,
+                  "protocol": "tcp"
+                }
+              ]
+            }
+          ]
+        }
+        EOF
+
+        aws ecs register-task-definition \
+          --cli-input-json file://task-definition.json
+
+    - name: Create service if not exists
+      run: |
+        if ! aws ecs describe-services \
+          --cluster ${{ secrets.ECS_CLUSTER }} \
+          --services ${{ secrets.ECS_SERVICE }} \
+          --query "services[0].status" \
+          --output text 2>/dev/null | grep ACTIVE; then
+
+          aws ecs create-service \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service-name ${{ secrets.ECS_SERVICE }} \
+            --task-definition my-task \
+            --desired-count 1 \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],assignPublicIp=ENABLED}"
+        fi
+
+    - name: Force new deployment
       run: |
         aws ecs update-service \
           --cluster ${{ secrets.ECS_CLUSTER }} \
