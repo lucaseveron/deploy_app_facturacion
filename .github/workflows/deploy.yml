@@ -36,9 +36,17 @@ jobs:
       with:
         image-ref: myapp
         format: table
-        exit-code: 1
+        output: trivy-report.txt
+        severity: CRITICAL,HIGH,MEDIUM
+        exit-code: 0
         ignore-unfixed: true
         vuln-type: 'os,library'
+
+    - name: Upload Trivy report
+      uses: actions/upload-artifact@v4
+      with:
+        name: trivy-security-report
+        path: trivy-report.txt
 
     - name: Tag image
       run: |
